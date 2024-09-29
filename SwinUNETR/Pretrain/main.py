@@ -20,12 +20,38 @@ import torch.optim as optim
 from losses.loss import Loss
 from models.ssl_head import SSLHead
 from optimizers.lr_scheduler import WarmupCosineSchedule
-from torch.cuda.amp import GradScaler, autocast
+#from torch.cuda.amp import GradScaler, autocast
+from torch import autocast
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.tensorboard import SummaryWriter
+#from torch.utils.tensorboard import SummaryWriter
 from utils.data_utils import get_loader
 from utils.ops import aug_rand, rot_rand
 
+def model_view(model):
+    cnt = 0
+    out = []
+    out.append(f'{model.__class__}')
+    out.append('Parameters')
+    for name, p in model.named_parameters():
+        out.append(f'  {name}: {p.shape} {p.dtype} {p.device}')
+        cnt += np.prod(p.shape)
+    out.append(f'  Total: {int(cnt)}')
+    print('\n'.join(out), flush=True)
+
+def filter_load(model_pth):
+        model_dict = torch.load(model_pth)
+        state_dict = model_dict["state_dict"]
+        # fix potential differences in state dict keys from pre-training to
+        # fine-tuning
+        if "module." in list(state_dict.keys())[0]:
+            print("Tag 'module.' found in state dict - fixing!")
+            for key in list(state_dict.keys()):
+                state_dict[key.replace("module.", "")] = state_dict.pop(key)
+        if "swin_vit" in list(state_dict.keys())[0]:
+            print("Tag 'swin_vit' found in state dict - fixing!")
+            for key in list(state_dict.keys()):
+                state_dict[key.replace("swin_vit", "swinViT")] = state_dict.pop(key)
+        return model_dict
 
 def main():
     def save_ckp(state, checkpoint_dir):
@@ -38,14 +64,14 @@ def main():
 
         for step, batch in enumerate(train_loader):
             t1 = time()
-            x = batch["image"].cuda()
+            x = batch["image"].to(args.device)
             x1, rot1 = rot_rand(args, x)
             x2, rot2 = rot_rand(args, x)
             x1_augment = aug_rand(args, x1)
             x2_augment = aug_rand(args, x2)
             x1_augment = x1_augment
             x2_augment = x2_augment
-            with autocast(enabled=args.amp):
+            with autocast(args.autocast_device_type, enabled=args.amp):
                 rot1_p, contrastive1_p, rec_x1 = model(x1_augment)
                 rot2_p, contrastive2_p, rec_x2 = model(x2_augment)
                 rot_p = torch.cat([rot1_p, rot2_p], dim=0)
@@ -68,11 +94,8 @@ def main():
             if args.lrdecay:
                 scheduler.step()
             optimizer.zero_grad()
-            if args.distributed:
-                if dist.get_rank() == 0:
-                    print("Step:{}/{}, Loss:{:.4f}, Time:{:.4f}".format(global_step, args.num_steps, loss, time() - t1))
-            else:
-                print("Step:{}/{}, Loss:{:.4f}, Time:{:.4f}".format(global_step, args.num_steps, loss, time() - t1))
+            if args.rank == 0:
+                print("Step:{}/{}, Loss:{:.4f} ({:.4f}, {:.4f}, {:.4f}), Time:{:.4f}".format(global_step, args.num_steps, loss, losses_tasks[0].item(), losses_tasks[1].item(), losses_tasks[2].item(), time() - t1),flush=True)
 
             global_step += 1
             if args.distributed:
@@ -82,13 +105,16 @@ def main():
 
             if val_cond:
                 val_loss, val_loss_recon, img_list = validation(args, test_loader)
-                writer.add_scalar("Validation/loss_recon", scalar_value=val_loss_recon, global_step=global_step)
-                writer.add_scalar("train/loss_total", scalar_value=np.mean(loss_train), global_step=global_step)
-                writer.add_scalar("train/loss_recon", scalar_value=np.mean(loss_train_recon), global_step=global_step)
+                print("Validation/loss_recon", val_loss_recon, global_step,flush=True)
+                print("train/loss_total", np.mean(loss_train), global_step,flush=True)
+                print("train/loss_recon", np.mean(loss_train_recon), global_step,flush=True)
+                #writer.add_scalar("Validation/loss_recon", scalar_value=val_loss_recon, global_step=global_step)
+                #writer.add_scalar("train/loss_total", scalar_value=np.mean(loss_train), global_step=global_step)
+                #writer.add_scalar("train/loss_recon", scalar_value=np.mean(loss_train_recon), global_step=global_step)
 
-                writer.add_image("Validation/x1_gt", img_list[0], global_step, dataformats="HW")
-                writer.add_image("Validation/x1_aug", img_list[1], global_step, dataformats="HW")
-                writer.add_image("Validation/x1_recon", img_list[2], global_step, dataformats="HW")
+                #writer.add_image("Validation/x1_gt", img_list[0], global_step, dataformats="HW")
+                #writer.add_image("Validation/x1_aug", img_list[1], global_step, dataformats="HW")
+                #writer.add_image("Validation/x1_recon", img_list[2], global_step, dataformats="HW")
 
                 if val_loss_recon < val_best:
                     val_best = val_loss_recon
@@ -97,18 +123,20 @@ def main():
                         "state_dict": model.state_dict(),
                         "optimizer": optimizer.state_dict(),
                     }
-                    save_ckp(checkpoint, logdir + "/model_bestValRMSE.pt")
+                    save_ckp(checkpoint, os.path.join(logdir,"model_bestValRMSE.pt"))
                     print(
                         "Model was saved ! Best Recon. Val Loss: {:.4f}, Recon. Val Loss: {:.4f}".format(
                             val_best, val_loss_recon
-                        )
+                        ), flush=True
                     )
                 else:
                     print(
                         "Model was not saved ! Best Recon. Val Loss: {:.4f} Recon. Val Loss: {:.4f}".format(
                             val_best, val_loss_recon
-                        )
+                        ), flush=True
                     )
+            if global_step > args.num_steps:
+               break
         return global_step, loss, val_best
 
     def validation(args, test_loader):
@@ -117,12 +145,12 @@ def main():
         loss_val_recon = []
         with torch.no_grad():
             for step, batch in enumerate(test_loader):
-                val_inputs = batch["image"].cuda()
+                val_inputs = batch["image"].to(args.device)
                 x1, rot1 = rot_rand(args, val_inputs)
                 x2, rot2 = rot_rand(args, val_inputs)
                 x1_augment = aug_rand(args, x1)
                 x2_augment = aug_rand(args, x2)
-                with autocast(enabled=args.amp):
+                with autocast(args.autocast_device_type, enabled=args.amp):
                     rot1_p, contrastive1_p, rec_x1 = model(x1_augment)
                     rot2_p, contrastive2_p, rec_x2 = model(x2_augment)
                     rot_p = torch.cat([rot1_p, rot2_p], dim=0)
@@ -133,28 +161,55 @@ def main():
                 loss_recon = losses_tasks[2]
                 loss_val.append(loss.item())
                 loss_val_recon.append(loss_recon.item())
-                x_gt = x1.detach().cpu().numpy()
-                x_gt = (x_gt - np.min(x_gt)) / (np.max(x_gt) - np.min(x_gt))
-                xgt = x_gt[0][0][:, :, 48] * 255.0
-                xgt = xgt.astype(np.uint8)
-                x1_augment = x1_augment.detach().cpu().numpy()
-                x1_augment = (x1_augment - np.min(x1_augment)) / (np.max(x1_augment) - np.min(x1_augment))
-                x_aug = x1_augment[0][0][:, :, 48] * 255.0
-                x_aug = x_aug.astype(np.uint8)
-                rec_x1 = rec_x1.detach().cpu().numpy()
-                rec_x1 = (rec_x1 - np.min(rec_x1)) / (np.max(rec_x1) - np.min(rec_x1))
-                recon = rec_x1[0][0][:, :, 48] * 255.0
-                recon = recon.astype(np.uint8)
-                img_list = [xgt, x_aug, recon]
-                print("Validation step:{}, Loss:{:.4f}, Loss Reconstruction:{:.4f}".format(step, loss, loss_recon))
+
+                #x_gt = x1.detach().cpu().numpy()
+                #x_gt = (x_gt - np.min(x_gt)) / (np.max(x_gt) - np.min(x_gt))
+                #xgt = x_gt[0][0][:, :, 48] * 255.0
+                #xgt = xgt.astype(np.uint8)
+                #x1_augment = x1_augment.detach().cpu().numpy()
+                #x1_augment = (x1_augment - np.min(x1_augment)) / (np.max(x1_augment) - np.min(x1_augment))
+                #x_aug = x1_augment[0][0][:, :, 48] * 255.0
+                #x_aug = x_aug.astype(np.uint8)
+                #rec_x1 = rec_x1.detach().cpu().numpy()
+                #rec_x1 = (rec_x1 - np.min(rec_x1)) / (np.max(rec_x1) - np.min(rec_x1))
+                #recon = rec_x1[0][0][:, :, 48] * 255.0
+                #recon = recon.astype(np.uint8)
+                #img_list = [xgt, x_aug, recon]
+                img_list = None
+                print("    Validation step:{}, Loss:{:.4f}, Loss Reconstruction:{:.4f}".format(step, loss, loss_recon),flush=True)
 
         return np.mean(loss_val), np.mean(loss_val_recon), img_list
 
+    def dump_images(args, loader, basename):
+        model.eval()
+        with torch.no_grad():
+            for step, batch in enumerate(loader):
+                fname = f'{basename}_{step}.npz'
+                fname = os.path.join(logdir,fname)
+                val_inputs = batch["image"].to(args.device)
+                x1, rot1 = rot_rand(args, val_inputs)
+                x2, rot2 = rot_rand(args, val_inputs)
+                x1_augment = aug_rand(args, x1)
+                x2_augment = aug_rand(args, x2)
+                with autocast(args.autocast_device_type, enabled=args.amp):
+                    rec_in = (model(val_inputs)[2]).detach().cpu().numpy()
+                    rec_x1 = (model(x1_augment)[2]).detach().cpu().numpy()
+                    rec_x2 = (model(x2_augment)[2]).detach().cpu().numpy()
+                    or_in = val_inputs.detach().cpu().numpy()
+                    or_x1 = x1_augment.detach().cpu().numpy()
+                    or_x2 = x2_augment.detach().cpu().numpy()
+
+                np.savez(fname, or_in=or_in, or_x1=or_x1, or_x2=or_x2, rec_in=rec_in, rec_x1=rec_x1, rec_x2=rec_x2)
+
+
     parser = argparse.ArgumentParser(description="PyTorch Training")
-    parser.add_argument("--logdir", default="test", type=str, help="directory to save the tensorboard logs")
+    parser.add_argument("--logdir", default="test", type=str, help="directory to save")
+    parser.add_argument("--datadir", default="dataset", type=str, help="directory where input data resides")
+    parser.add_argument("--jsonlist", default=argparse.SUPPRESS, type=str, help="comma separated list of json files")
+    parser.add_argument("--datasetlist",default=argparse.SUPPRESS,type=str, help="comma separated list of dataset names")
     parser.add_argument("--epochs", default=100, type=int, help="number of training epochs")
     parser.add_argument("--num_steps", default=100000, type=int, help="number of training iterations")
-    parser.add_argument("--eval_num", default=100, type=int, help="evaluation frequency")
+    parser.add_argument("--eval_num", default=500, type=int, help="evaluation frequency")
     parser.add_argument("--warmup_steps", default=500, type=int, help="warmup steps")
     parser.add_argument("--in_channels", default=1, type=int, help="number of input channels")
     parser.add_argument("--feature_size", default=48, type=int, help="embedding size")
@@ -165,9 +220,6 @@ def main():
     parser.add_argument("--a_max", default=1000, type=float, help="a_max in ScaleIntensityRanged")
     parser.add_argument("--b_min", default=0.0, type=float, help="b_min in ScaleIntensityRanged")
     parser.add_argument("--b_max", default=1.0, type=float, help="b_max in ScaleIntensityRanged")
-    parser.add_argument("--space_x", default=1.5, type=float, help="spacing in x direction")
-    parser.add_argument("--space_y", default=1.5, type=float, help="spacing in y direction")
-    parser.add_argument("--space_z", default=2.0, type=float, help="spacing in z direction")
     parser.add_argument("--roi_x", default=96, type=int, help="roi size in x direction")
     parser.add_argument("--roi_y", default=96, type=int, help="roi size in y direction")
     parser.add_argument("--roi_z", default=96, type=int, help="roi size in z direction")
@@ -185,44 +237,74 @@ def main():
     parser.add_argument("--local_rank", type=int, default=0, help="local rank")
     parser.add_argument("--grad_clip", action="store_true", help="gradient clip")
     parser.add_argument("--noamp", action="store_true", help="do NOT use amp for training")
-    parser.add_argument("--dist-url", default="env://", help="url used to set up distributed training")
     parser.add_argument("--smartcache_dataset", action="store_true", help="use monai smartcache Dataset")
     parser.add_argument("--cache_dataset", action="store_true", help="use monai cache Dataset")
-
+    parser.add_argument("--check_images", action="store_true", help="dump images")
+    #parser.add_argument('--no-zendnn', action='store_true', default=False, help='disables ZenDNN')
     args = parser.parse_args()
-    logdir = "./runs/" + args.logdir
+
+    if not 'jsonlist' in args:
+      raise RuntimeError('Must supply --jsonlist argument')
+    if not 'datasetlist' in args:
+      raise RuntimeError('Must supply --datasetlist argument')
+    args.jsonlist = args.jsonlist.split(',')
+    args.datasetlist = args.datasetlist.split(',')
+
+    #use_zendnn = not args.no_zendnn
+    #if use_zendnn:
+    #    import zentorch
+    args.cuda = torch.cuda.is_available()
+    logdir = args.logdir
     args.amp = not args.noamp
-    torch.backends.cudnn.benchmark = True
+    if args.cuda:
+        torch.backends.cudnn.benchmark = True
+    else:
+        args.amp = False # XXX
     torch.autograd.set_detect_anomaly(True)
     args.distributed = False
     if "WORLD_SIZE" in os.environ:
-        args.distributed = int(os.environ["WORLD_SIZE"]) > 1
-    args.device = "cuda:0"
+        args.distributed = True #int(os.environ["WORLD_SIZE"]) > 1
     args.world_size = 1
     args.rank = 0
+    device_type = 'GPU' if args.cuda else 'CPU'
+    args.autocast_device_type = 'cuda' if args.cuda else 'cpu'
 
     if args.distributed:
-        args.device = "cuda:%d" % args.local_rank
-        torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group(backend="nccl", init_method=args.dist_url)
+        backend = "nccl" if args.cuda else "gloo"
+        args.device = torch.device("cuda:%d" % args.local_rank if args.cuda else "cpu")
+        if args.cuda:
+           torch.cuda.set_device(args.local_rank)
+        torch.distributed.init_process_group(backend=backend)
         args.world_size = torch.distributed.get_world_size()
         args.rank = torch.distributed.get_rank()
-        print(
-            "Training in distributed mode with multiple processes, 1 GPU per process. Process %d, total %d."
-            % (args.rank, args.world_size)
-        )
+        if args.rank == 0:
+          print(
+              "Training in distributed mode with multiple processes, 1 {0} per process. Total processes {1}."
+              .format(device_type, args.world_size)
+          )
     else:
-        print("Training with a single process on 1 GPUs.")
-    assert args.rank >= 0
+        args.device = torch.device("cuda:0" if args.cuda else "cpu")
+        print(f"Training with a single process on 1 {device_type}.")
 
     if args.rank == 0:
         os.makedirs(logdir, exist_ok=True)
-        writer = SummaryWriter(logdir)
-    else:
-        writer = None
 
+    if args.rank == 0:
+       print("============ARGUMENTS==============")
+       print('\n'.join(f'{k}={v}' for k, v in vars(args).items()))
+       print("===================================")
     model = SSLHead(args)
-    model.cuda()
+    if args.cuda:
+        model.cuda()
+    #else:
+    #    print(f'Compiling model ZEN ? {use_zendnn}',flush=True)
+    #    # Too slow when tracing, segfaults!
+    #    #if use_zendnn:
+    #    #    model = torch.compile(model, backend='zentorch')
+    #    #else:
+    #    #    model = torch.compile(model, mode='reduce-overhead')
+    # params: 19097191
+    #model_view(model)
 
     if args.opt == "adam":
         optimizer = optim.Adam(params=model.parameters(), lr=args.lr, weight_decay=args.decay)
@@ -235,9 +317,10 @@ def main():
 
     if args.resume:
         model_pth = args.resume
-        model_dict = torch.load(model_pth)
+        #model_dict = torch.load(model_pth)
+        model_dict = filter_load(model_pth)
         model.load_state_dict(model_dict["state_dict"])
-        model.epoch = model_dict["epoch"]
+        #model.epoch = model_dict["epoch"]
         model.optimizer = model_dict["optimizer"]
 
     if args.lrdecay:
@@ -254,8 +337,16 @@ def main():
     loss_function = Loss(args.batch_size * args.sw_batch_size, args)
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = DistributedDataParallel(model, device_ids=[args.local_rank])
+        if args.cuda:
+           model = DistributedDataParallel(model, device_ids=[args.local_rank])
+        else:
+           model = DistributedDataParallel(model)
     train_loader, test_loader = get_loader(args)
+
+    if args.check_images:
+      dump_images(args, train_loader, "train")
+      dump_images(args, test_loader, "test")
+      return
 
     global_step = 0
     best_val = 1e8
@@ -269,11 +360,11 @@ def main():
 
     if args.distributed:
         if dist.get_rank() == 0:
-            torch.save(model.state_dict(), logdir + "final_model.pth")
+            torch.save(model.state_dict(), os.path.join(logdir,"final_model.pth"))
         dist.destroy_process_group()
     else:
-        torch.save(model.state_dict(), logdir + "final_model.pth")
-    save_ckp(checkpoint, logdir + "/model_final_epoch.pt")
+        torch.save(model.state_dict(), os.path.join(logdir,"final_model.pth"))
+    save_ckp(checkpoint, os.path.join(logdir,"model_final_epoch.pt"))
 
 
 if __name__ == "__main__":

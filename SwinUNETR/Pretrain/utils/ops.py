@@ -14,6 +14,7 @@ import torch
 from numpy.random import randint
 
 
+#def patch_rand_drop(args, x, x_rep=None, max_drop=0.3, max_block_sz=0.1, tolr=0.05):
 def patch_rand_drop(args, x, x_rep=None, max_drop=0.3, max_block_sz=0.25, tolr=0.05):
     c, h, w, z = x.size()
     n_drop_pix = np.random.uniform(0, max_drop) * h * w * z
@@ -31,7 +32,7 @@ def patch_rand_drop(args, x, x_rep=None, max_drop=0.3, max_block_sz=0.25, tolr=0
         rnd_z = min(randint(tolr[2], mx_blk_slices) + rnd_s, z)
         if x_rep is None:
             x_uninitialized = torch.empty(
-                (c, rnd_h - rnd_r, rnd_w - rnd_c, rnd_z - rnd_s), dtype=x.dtype, device=args.local_rank
+                (c, rnd_h - rnd_r, rnd_w - rnd_c, rnd_z - rnd_s), dtype=x.dtype, device=args.device
             ).normal_()
             x_uninitialized = (x_uninitialized - torch.min(x_uninitialized)) / (
                 torch.max(x_uninitialized) - torch.min(x_uninitialized)
@@ -42,23 +43,23 @@ def patch_rand_drop(args, x, x_rep=None, max_drop=0.3, max_block_sz=0.25, tolr=0
         total_pix = total_pix + (rnd_h - rnd_r) * (rnd_w - rnd_c) * (rnd_z - rnd_s)
     return x
 
+ROT_AXIS = (2, 3)
 
 def rot_rand(args, x_s):
     img_n = x_s.size()[0]
     x_aug = x_s.detach().clone()
-    device = torch.device(f"cuda:{args.local_rank}")
-    x_rot = torch.zeros(img_n).long().to(device)
+    x_rot = torch.zeros(img_n).long().to(args.device)
     for i in range(img_n):
         x = x_s[i]
         orientation = np.random.randint(0, 4)
         if orientation == 0:
             pass
         elif orientation == 1:
-            x = x.rot90(1, (2, 3))
+            x = x.rot90(1, ROT_AXIS)
         elif orientation == 2:
-            x = x.rot90(2, (2, 3))
+            x = x.rot90(2, ROT_AXIS)
         elif orientation == 3:
-            x = x.rot90(3, (2, 3))
+            x = x.rot90(3, ROT_AXIS)
         x_aug[i] = x
         x_rot[i] = orientation
     return x_aug, x_rot

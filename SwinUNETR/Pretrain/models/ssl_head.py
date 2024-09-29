@@ -77,7 +77,12 @@ class SSLHead(nn.Module):
             )
 
     def forward(self, x):
+        # only coarsest latent space
         x_out = self.swinViT(x.contiguous())[4]
+        #xc = x.contiguous()
+        #x_out_full = self.swinViT(xc)
+        #x_out = x_out_full[4]
+
         _, c, h, w, d = x_out.shape
         x4_reshape = x_out.flatten(start_dim=2, end_dim=4)
         x4_reshape = x4_reshape.transpose(1, 2)
