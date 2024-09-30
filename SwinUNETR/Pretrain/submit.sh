@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --partition=72hours
+#SBATCH --qos=72hours
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=192
@@ -28,7 +29,7 @@ SWBS=2 # sliding-window mini-batch size per node (not sure what does it mean)
 # -> (total mini-batch size is nodes * bs *sw_bs)
 STEPS=100000 # how many steps to take
 
-EVALEVERY=50 # test validation every given number of steps
+EVALEVERY=10 # test validation every given number of steps
 
 OPTOPTS="--lrdecay --lr=4e-4 --decay=1.e-5 --momentum=0.9 --opt=adamw --lr_schedule=warmup_cosine" # optimizer options (https://arxiv.org/pdf/2111.14791)
 
@@ -38,7 +39,7 @@ AMIN=0
 AMAX=14
 IMAGE_TRANSFORM_OPTIONS="--a_min $AMIN --a_max $AMAX"
 
-# input/output classes
+# input/output channels
 IN_CHANNELS=1
 OUT_CHANNELS=15
 HEAD_OPTIONS="--in_channels=$IN_CHANNELS --out_channels=$OUT_CHANNELS"
