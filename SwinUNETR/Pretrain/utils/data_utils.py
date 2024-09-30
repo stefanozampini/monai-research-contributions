@@ -94,12 +94,11 @@ def get_loader(args):
             ]
         )
     else:
-        #import numpy as np
         # See /project/k10123/datasets/generate_geo_1.py
         def exclude_air(img):
             return img > 0
 
-        allow_smaller=True
+        #allow_smaller=True
         train_transforms = Compose(
             [
                 LoadImaged(keys=["image"]),
@@ -143,8 +142,9 @@ def get_loader(args):
         )
 
     if args.cache_dataset:
+        cache_rate = 1.0
         if args.rank == 0: print("Using MONAI Cache Dataset")
-        train_ds = CacheDataset(data=datalist, transform=train_transforms, cache_rate=0.5, num_workers=num_workers)
+        train_ds = CacheDataset(data=datalist, transform=train_transforms, cache_rate=cache_rate, num_workers=num_workers)
     elif args.smartcache_dataset:
         if args.rank == 0: print("Using MONAI SmartCache Dataset")
         train_ds = SmartCacheDataset(

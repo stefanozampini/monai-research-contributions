@@ -33,7 +33,7 @@ def model_view(model):
     out.append(f'{model.__class__}')
     out.append('Parameters')
     for name, p in model.named_parameters():
-        out.append(f'  {name}: {p.shape} {p.dtype} {p.device}')
+        out.append(f'  {name}: {p.requires_grad} {p.shape} {p.dtype} {p.device}')
         cnt += np.prod(p.shape)
     out.append(f'  Total: {int(cnt)}')
     print('\n'.join(out), flush=True)
@@ -71,6 +71,7 @@ def main():
             x2_augment = aug_rand(args, x2)
             x1_augment = x1_augment
             x2_augment = x2_augment
+            t2 = time()
             with autocast(args.autocast_device_type, enabled=args.amp):
                 rot1_p, contrastive1_p, rec_x1 = model(x1_augment)
                 rot2_p, contrastive2_p, rec_x2 = model(x2_augment)
@@ -95,7 +96,7 @@ def main():
                 scheduler.step()
             optimizer.zero_grad()
             if args.rank == 0:
-                print("Step:{}/{}, Loss:{:.4f} ({:.4f}, {:.4f}, {:.4f}), Time:{:.4f}".format(global_step, args.num_steps, loss, losses_tasks[0].item(), losses_tasks[1].item(), losses_tasks[2].item(), time() - t1),flush=True)
+                print("Step:{}/{}, Loss:{:.4f} ({:.4f}, {:.4f}, {:.4f}), Time:{:.4f} ({:.4f})".format(global_step, args.num_steps, loss, losses_tasks[0].item(), losses_tasks[1].item(), losses_tasks[2].item(), time() - t1, t2 - t1),flush=True)
 
             global_step += 1
             if args.distributed:
@@ -112,10 +113,6 @@ def main():
                 #writer.add_scalar("train/loss_total", scalar_value=np.mean(loss_train), global_step=global_step)
                 #writer.add_scalar("train/loss_recon", scalar_value=np.mean(loss_train_recon), global_step=global_step)
 
-                #writer.add_image("Validation/x1_gt", img_list[0], global_step, dataformats="HW")
-                #writer.add_image("Validation/x1_aug", img_list[1], global_step, dataformats="HW")
-                #writer.add_image("Validation/x1_recon", img_list[2], global_step, dataformats="HW")
-
                 if val_loss_recon < val_best:
                     val_best = val_loss_recon
                     checkpoint = {
@@ -124,6 +121,7 @@ def main():
                         "optimizer": optimizer.state_dict(),
                     }
                     save_ckp(checkpoint, os.path.join(logdir,"model_bestValRMSE.pt"))
+                    dump_images(args, img_list, "test_best", distributed=False)
                     print(
                         "Model was saved ! Best Recon. Val Loss: {:.4f}, Recon. Val Loss: {:.4f}".format(
                             val_best, val_loss_recon
@@ -139,10 +137,18 @@ def main():
                break
         return global_step, loss, val_best
 
+    def model_to_img(inputs, args, rec = None):
+        if rec is None:
+           rec = model(inputs)[2]
+        if args.out_channels > 1:
+           rec = torch.argmax(rec, 1) / args.out_channels # put back to [0,1]
+        return inputs.detach().cpu().numpy(), rec.detach().cpu().numpy()
+
     def validation(args, test_loader):
         model.eval()
         loss_val = []
         loss_val_recon = []
+        img_list = []
         with torch.no_grad():
             for step, batch in enumerate(test_loader):
                 val_inputs = batch["image"].to(args.device)
@@ -158,47 +164,40 @@ def main():
                     imgs_recon = torch.cat([rec_x1, rec_x2], dim=0)
                     imgs = torch.cat([x1, x2], dim=0)
                     loss, losses_tasks = loss_function(rot_p, rots, contrastive1_p, contrastive2_p, imgs_recon, imgs)
+                    # images
+                    or_in, rec_in = model_to_img(val_inputs, args)
+                    or_x1, rec_x1 = model_to_img(x1_augment, args, rec=rec_x1)
+                    or_x2, rec_x2 = model_to_img(x2_augment, args, rec=rec_x2)
                 loss_recon = losses_tasks[2]
                 loss_val.append(loss.item())
                 loss_val_recon.append(loss_recon.item())
-
-                #x_gt = x1.detach().cpu().numpy()
-                #x_gt = (x_gt - np.min(x_gt)) / (np.max(x_gt) - np.min(x_gt))
-                #xgt = x_gt[0][0][:, :, 48] * 255.0
-                #xgt = xgt.astype(np.uint8)
-                #x1_augment = x1_augment.detach().cpu().numpy()
-                #x1_augment = (x1_augment - np.min(x1_augment)) / (np.max(x1_augment) - np.min(x1_augment))
-                #x_aug = x1_augment[0][0][:, :, 48] * 255.0
-                #x_aug = x_aug.astype(np.uint8)
-                #rec_x1 = rec_x1.detach().cpu().numpy()
-                #rec_x1 = (rec_x1 - np.min(rec_x1)) / (np.max(rec_x1) - np.min(rec_x1))
-                #recon = rec_x1[0][0][:, :, 48] * 255.0
-                #recon = recon.astype(np.uint8)
-                #img_list = [xgt, x_aug, recon]
-                img_list = None
-                print("    Validation step:{}, Loss:{:.4f}, Loss Reconstruction:{:.4f}".format(step, loss, loss_recon),flush=True)
+                img_list.append((or_in, rec_in, or_x1, rec_x1, or_x2, rec_x2))
+                print("    Validation step:{}, Losses:{:.4f}, {:.4f}, {:.4f}".format(step, losses_tasks[0], losses_tasks[1], losses_tasks[2]),flush=True)
 
         return np.mean(loss_val), np.mean(loss_val_recon), img_list
 
-    def dump_images(args, loader, basename):
+    def dump_images(args, loader_or_img_list, basename, distributed=True):
         model.eval()
+        islist = isinstance(loader_or_img_list, list)
         with torch.no_grad():
-            for step, batch in enumerate(loader):
-                fname = f'{basename}_{step}.npz'
+            for step, batch in enumerate(loader_or_img_list):
+                if distributed and args.world_size > 1:
+                   fname = f'{basename}_{step}_{args.rank}.npz'
+                else:
+                   fname = f'{basename}_{step}.npz'
                 fname = os.path.join(logdir,fname)
-                val_inputs = batch["image"].to(args.device)
-                x1, rot1 = rot_rand(args, val_inputs)
-                x2, rot2 = rot_rand(args, val_inputs)
-                x1_augment = aug_rand(args, x1)
-                x2_augment = aug_rand(args, x2)
-                with autocast(args.autocast_device_type, enabled=args.amp):
-                    rec_in = (model(val_inputs)[2]).detach().cpu().numpy()
-                    rec_x1 = (model(x1_augment)[2]).detach().cpu().numpy()
-                    rec_x2 = (model(x2_augment)[2]).detach().cpu().numpy()
-                    or_in = val_inputs.detach().cpu().numpy()
-                    or_x1 = x1_augment.detach().cpu().numpy()
-                    or_x2 = x2_augment.detach().cpu().numpy()
-
+                if islist:
+                    or_in, rec_in, or_x1, rec_x1, or_x2, rec_x2 = batch
+                else:
+                    val_inputs = batch["image"].to(args.device)
+                    x1, rot1 = rot_rand(args, val_inputs)
+                    x2, rot2 = rot_rand(args, val_inputs)
+                    x1_augment = aug_rand(args, x1)
+                    x2_augment = aug_rand(args, x2)
+                    with autocast(args.autocast_device_type, enabled=args.amp):
+                        or_in, rec_in = model_to_img(val_inputs, args)
+                        or_x1, rec_x1 = model_to_img(x1_augment, args)
+                        or_x2, rec_x2 = model_to_img(x2_augment, args)
                 np.savez(fname, or_in=or_in, or_x1=or_x1, or_x2=or_x2, rec_in=rec_in, rec_x1=rec_x1, rec_x2=rec_x2)
 
 
@@ -212,6 +211,7 @@ def main():
     parser.add_argument("--eval_num", default=500, type=int, help="evaluation frequency")
     parser.add_argument("--warmup_steps", default=500, type=int, help="warmup steps")
     parser.add_argument("--in_channels", default=1, type=int, help="number of input channels")
+    parser.add_argument("--out_channels", default=1, type=int, help="number of output channels")
     parser.add_argument("--feature_size", default=48, type=int, help="embedding size")
     parser.add_argument("--dropout_path_rate", default=0.0, type=float, help="drop path rate")
     parser.add_argument("--use_checkpoint", action="store_true", help="use gradient checkpointing to save memory")
@@ -240,6 +240,7 @@ def main():
     parser.add_argument("--smartcache_dataset", action="store_true", help="use monai smartcache Dataset")
     parser.add_argument("--cache_dataset", action="store_true", help="use monai cache Dataset")
     parser.add_argument("--check_images", action="store_true", help="dump images")
+    parser.add_argument("--view_model", action="store_true", help="view model")
     #parser.add_argument('--no-zendnn', action='store_true', default=False, help='disables ZenDNN')
     args = parser.parse_args()
 
@@ -304,7 +305,8 @@ def main():
     #    #else:
     #    #    model = torch.compile(model, mode='reduce-overhead')
     # params: 19097191
-    #model_view(model)
+    if args.view_model:
+       model_view(model)
 
     if args.opt == "adam":
         optimizer = optim.Adam(params=model.parameters(), lr=args.lr, weight_decay=args.decay)
@@ -334,7 +336,7 @@ def main():
 
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambdas)
 
-    loss_function = Loss(args.batch_size * args.sw_batch_size, args)
+    loss_function = Loss(args)
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         if args.cuda:

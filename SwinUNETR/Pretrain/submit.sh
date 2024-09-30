@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --partition=workq
-#SBATCH --nodes=1
+#SBATCH --partition=72hours
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=192
 #SBATCH --hint=nomultithread
 #SBATCH --account=k10123
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 #SBATCH --output=slurm-%A.out
 #SBATCH --error=slurm-%A.out
 
@@ -38,6 +38,11 @@ AMIN=0
 AMAX=14
 IMAGE_TRANSFORM_OPTIONS="--a_min $AMIN --a_max $AMAX"
 
+# input/output classes
+IN_CHANNELS=1
+OUT_CHANNELS=15
+HEAD_OPTIONS="--in_channels=$IN_CHANNELS --out_channels=$OUT_CHANNELS"
+
 DATADIR="/project/k10123/datasets/test-geo-100" # where to find datasets and jsons
 JSONLIST="dataset_0.json" # comma separated list of json filenames
 DATASETLIST="dataset" # comma separated list of folder name where datasets are stored
@@ -47,18 +52,18 @@ DATASETLIST="dataset" # comma separated list of folder name where datasets are s
 #DATASETLIST="dataset1"
 
 # if you want to resume from previously trained weights
-RESUME="--resume=/scratch/zampins/fm4g/first-tests-runs/1407742/model_bestValRMSE.pt"
+# RESUME="--resume=/scratch/zampins/fm4g/first-tests-runs/1407742/model_bestValRMSE.pt"
 
 # if you just want to dump images
 #DUMPIMG="--check_images"
 
 # Some more informative name for the output dir
-#JOB_SUFFIX=_whatever
+JOB_SUFFIX=_focal
 
 LOGDIR=/scratch/zampins/fm4g/first-tests-runs/${SLURM_JOB_ID}${JOB_SUFFIX} # where to dump the intermediate checkpoints
 
 # Python script with arguments
-SCRIPT="$MAIN --num_steps=$STEPS $OPTOPTS --eval_num=$EVALEVERY --batch_size=$BS --sw_batch_size=$SWBS --datadir=$DATADIR --logdir=$LOGDIR --jsonlist=$JSONLIST --datasetlist=$DATASETLIST $IMAGE_TRANSFORM_OPTIONS $RESUME $DUMPIMG"
+SCRIPT="$MAIN --num_steps=$STEPS $OPTOPTS --eval_num=$EVALEVERY --batch_size=$BS --sw_batch_size=$SWBS --datadir=$DATADIR --logdir=$LOGDIR --jsonlist=$JSONLIST --datasetlist=$DATASETLIST $IMAGE_TRANSFORM_OPTIONS $HEAD_OPTIONS $RESUME $DUMPIMG"
 
 mkdir -p $LOGDIR
 echo "Running LD_PRELOAD=/project/k10123/local/lib/libfakeintel.so MKL_NUM_THREADS=$NUM_THREADS srun -n $SLURM_NNODES -c 192 --ntasks-per-node 1 --hint=nomultithread --cpu-bind=cores torchrun --max_restarts=0 --nnodes=$SLURM_NNODES --nproc-per-node=1 --rdzv-id=$SLURM_JOB_ID --rdzv-backend=c10d --rdzv-endpoint=$HOST_NODE_ADDR $SCRIPT" > $LOGDIR/joboutput.log

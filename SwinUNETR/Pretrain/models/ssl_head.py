@@ -42,14 +42,14 @@ class SSLHead(nn.Module):
         self.contrastive_pre = nn.Identity()
         self.contrastive_head = nn.Linear(dim, 512)
         if upsample == "large_kernel_deconv":
-            self.conv = nn.ConvTranspose3d(dim, args.in_channels, kernel_size=(32, 32, 32), stride=(32, 32, 32))
+            self.conv = nn.ConvTranspose3d(dim, args.out_channels, kernel_size=(32, 32, 32), stride=(32, 32, 32))
         elif upsample == "deconv":
             self.conv = nn.Sequential(
                 nn.ConvTranspose3d(dim, dim // 2, kernel_size=(2, 2, 2), stride=(2, 2, 2)),
                 nn.ConvTranspose3d(dim // 2, dim // 4, kernel_size=(2, 2, 2), stride=(2, 2, 2)),
                 nn.ConvTranspose3d(dim // 4, dim // 8, kernel_size=(2, 2, 2), stride=(2, 2, 2)),
                 nn.ConvTranspose3d(dim // 8, dim // 16, kernel_size=(2, 2, 2), stride=(2, 2, 2)),
-                nn.ConvTranspose3d(dim // 16, args.in_channels, kernel_size=(2, 2, 2), stride=(2, 2, 2)),
+                nn.ConvTranspose3d(dim // 16, args.out_channels, kernel_size=(2, 2, 2), stride=(2, 2, 2)),
             )
         elif upsample == "vae":
             self.conv = nn.Sequential(
@@ -73,15 +73,17 @@ class SSLHead(nn.Module):
                 nn.InstanceNorm3d(dim // 16),
                 nn.LeakyReLU(),
                 nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False),
-                nn.Conv3d(dim // 16, args.in_channels, kernel_size=1, stride=1),
+                nn.Conv3d(dim // 16, args.out_channels, kernel_size=1, stride=1),
             )
 
     def forward(self, x):
         # only coarsest latent space
         x_out = self.swinViT(x.contiguous())[4]
-        #xc = x.contiguous()
-        #x_out_full = self.swinViT(xc)
-        #x_out = x_out_full[4]
+
+        # xc = x.contiguous()
+        # x_out_full = self.swinViT(xc)
+        # for i,l in enumerate(x_out_full): print(f'{i} shape {l.shape}')
+        # x_out = x_out_full[4]
 
         _, c, h, w, d = x_out.shape
         x4_reshape = x_out.flatten(start_dim=2, end_dim=4)
