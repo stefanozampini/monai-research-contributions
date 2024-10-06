@@ -140,8 +140,6 @@ def main():
     def model_to_img(inputs, args, rec = None):
         if rec is None:
            rec = model(inputs)[2]
-        if args.out_channels > 1:
-           rec = torch.argmax(rec, 1) / args.out_channels # put back to [0,1]
         return inputs.detach().cpu().numpy(), rec.detach().cpu().numpy()
 
     def validation(args, test_loader):

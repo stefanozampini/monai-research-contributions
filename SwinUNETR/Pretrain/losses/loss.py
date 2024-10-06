@@ -11,15 +11,36 @@
 
 import torch
 from torch.nn import functional as F
-from monai.losses import ContrastiveLoss, DiceCELoss, FocalLoss
+from monai.losses import ContrastiveLoss, GeneralizedDiceLoss
+
+class CE(torch.nn.CrossEntropyLoss):
+    def __init__(self, num_channels, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_class = num_channels - 1
+
+    def forward(self, inputs, targets):
+        targets = torch.squeeze(targets, 1)
+        targets = torch.round(targets * self._max_class).long()
+        return super().forward(inputs, targets)
+
+class GEN_DICE(GeneralizedDiceLoss):
+    def __init__(self, num_channels, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_class = num_channels - 1
+
+    def forward(self, inputs, targets):
+        if targets.shape[1] != 1:
+           raise ValueError(f"Unhandled target shape ({target.shape})")
+        targets = torch.round(targets * self._max_class).long()
+        return super().forward(inputs, targets)
 
 class Loss(torch.nn.Module):
     def __init__(self, args):
         super().__init__()
         self.rot_loss = torch.nn.CrossEntropyLoss()
         if args.out_channels > 1:
-            # self.recon_loss = DiceCELoss(to_onehot_y=True, softmax=True)
-            self.recon_loss = FocalLoss(to_onehot_y=True, use_softmax=True)
+            # self.recon_loss = GEN_DICE(args.out_channels, to_onehot_y=True, softmax=True)
+            self.recon_loss = CE(args.out_channels)
         else:
             self.recon_loss = torch.nn.L1Loss()
         self.contrast_loss = ContrastiveLoss()

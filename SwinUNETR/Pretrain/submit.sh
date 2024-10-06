@@ -42,6 +42,7 @@ IMAGE_TRANSFORM_OPTIONS="--a_min $AMIN --a_max $AMAX"
 # input/output channels
 IN_CHANNELS=1
 OUT_CHANNELS=15
+#OUT_CHANNELS=1
 HEAD_OPTIONS="--in_channels=$IN_CHANNELS --out_channels=$OUT_CHANNELS"
 
 DATADIR="/project/k10123/datasets/test-geo-100" # where to find datasets and jsons
