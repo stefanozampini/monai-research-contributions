@@ -34,7 +34,6 @@ def get_loader(args):
     jsonlist = [os.path.join(list_dir,json_f) for json_f in jsonfiles]
     datadirlist = [os.path.join(data_dir,d) for d in datasets_dir]
 
-    num_workers = 4
     datalist = [load_decathlon_datalist(j, False, "training", base_dir=d) for j,d in zip(jsonlist, datadirlist)]
     vallist = [load_decathlon_datalist(j, False, "validation", base_dir=d) for j,d in zip(jsonlist, datadirlist)]
     if args.rank == 0:
@@ -141,10 +140,13 @@ def get_loader(args):
             ]
         )
 
+    kwargs = {}
+    if args.num_workers > 0:
+       kwargs['num_workers'] = args.num_workers
     if args.cache_dataset:
         cache_rate = 1.0
         if args.rank == 0: print("Using MONAI Cache Dataset")
-        train_ds = CacheDataset(data=datalist, transform=train_transforms, cache_rate=cache_rate, num_workers=num_workers)
+        train_ds = CacheDataset(data=datalist, transform=train_transforms, cache_rate=cache_rate, **kwargs)
     elif args.smartcache_dataset:
         if args.rank == 0: print("Using MONAI SmartCache Dataset")
         train_ds = SmartCacheDataset(
@@ -162,9 +164,9 @@ def get_loader(args):
     else:
         train_sampler = None
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, num_workers=num_workers, sampler=train_sampler, drop_last=True
+        train_ds, batch_size=args.batch_size, sampler=train_sampler, drop_last=True, **kwargs,
     )
 
     val_ds = Dataset(data=vallist, transform=val_transforms)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, num_workers=num_workers, shuffle=False, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True, **kwargs)
     return train_loader, val_loader

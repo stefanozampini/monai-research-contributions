@@ -20,8 +20,12 @@ import torch.optim as optim
 from losses.loss import Loss
 from models.ssl_head import SSLHead
 from optimizers.lr_scheduler import WarmupCosineSchedule
-#from torch.cuda.amp import GradScaler, autocast
 from torch import autocast
+try:
+    from torch import GradScaler
+except ImportError:
+    GradScaler = None
+    pass
 from torch.nn.parallel import DistributedDataParallel
 #from torch.utils.tensorboard import SummaryWriter
 from utils.data_utils import get_loader
@@ -80,6 +84,8 @@ def main():
                 imgs_recon = torch.cat([rec_x1, rec_x2], dim=0)
                 imgs = torch.cat([x1, x2], dim=0)
                 loss, losses_tasks = loss_function(rot_p, rots, contrastive1_p, contrastive2_p, imgs_recon, imgs)
+                del imgs, imgs_recon, rots, rot1_p, rot2_p, rot_p, contrastive1_p, contrastive2_p, rec_x1, rec_x2
+
             loss_train.append(loss.item())
             loss_train_recon.append(losses_tasks[2].item())
             if args.amp:
@@ -133,6 +139,8 @@ def main():
                             val_best, val_loss_recon
                         ), flush=True
                     )
+                del img_list
+            del x, x1, rot1, x2, rot2, x1_augment, x2_augment
             if global_step > args.num_steps:
                break
         return global_step, loss, val_best
@@ -162,15 +170,20 @@ def main():
                     imgs_recon = torch.cat([rec_x1, rec_x2], dim=0)
                     imgs = torch.cat([x1, x2], dim=0)
                     loss, losses_tasks = loss_function(rot_p, rots, contrastive1_p, contrastive2_p, imgs_recon, imgs)
+
                     # images
                     or_in, rec_in = model_to_img(val_inputs, args)
                     or_x1, rec_x1 = model_to_img(x1_augment, args, rec=rec_x1)
                     or_x2, rec_x2 = model_to_img(x2_augment, args, rec=rec_x2)
+
+                    del imgs, imgs_recon, rots, rot1_p, rot2_p, rot_p, contrastive1_p, contrastive2_p
+
                 loss_recon = losses_tasks[2]
                 loss_val.append(loss.item())
                 loss_val_recon.append(loss_recon.item())
                 img_list.append((or_in, rec_in, or_x1, rec_x1, or_x2, rec_x2))
                 print("    Validation step:{}, Losses:{:.4f}, {:.4f}, {:.4f}".format(step, losses_tasks[0], losses_tasks[1], losses_tasks[2]),flush=True)
+                del val_inputs, x1, rot1, x2, rot2, x1_augment, x2_augment
 
         return np.mean(loss_val), np.mean(loss_val_recon), img_list
 
@@ -232,13 +245,13 @@ def main():
     parser.add_argument("--opt", default="adamw", type=str, help="optimization algorithm")
     parser.add_argument("--lr_schedule", default="warmup_cosine", type=str)
     parser.add_argument("--resume", default=None, type=str, help="resume training")
-    parser.add_argument("--local_rank", type=int, default=0, help="local rank")
     parser.add_argument("--grad_clip", action="store_true", help="gradient clip")
     parser.add_argument("--noamp", action="store_true", help="do NOT use amp for training")
     parser.add_argument("--smartcache_dataset", action="store_true", help="use monai smartcache Dataset")
     parser.add_argument("--cache_dataset", action="store_true", help="use monai cache Dataset")
     parser.add_argument("--check_images", action="store_true", help="dump images")
     parser.add_argument("--view_model", action="store_true", help="view model")
+    parser.add_argument("--num_workers", default=4, type=int, help="number of workers")
     #parser.add_argument('--no-zendnn', action='store_true', default=False, help='disables ZenDNN')
     args = parser.parse_args()
 
@@ -267,12 +280,15 @@ def main():
     args.rank = 0
     device_type = 'GPU' if args.cuda else 'CPU'
     args.autocast_device_type = 'cuda' if args.cuda else 'cpu'
-
+    args.local_rank = int(os.environ.get('LOCAL_RANK',0))
     if args.distributed:
         backend = "nccl" if args.cuda else "gloo"
-        args.device = torch.device("cuda:%d" % args.local_rank if args.cuda else "cpu")
         if args.cuda:
-           torch.cuda.set_device(args.local_rank)
+           os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+           args.device = torch.device('cuda', args.local_rank)
+           torch.cuda.set_device(args.device)
+        else:
+           args.device = torch.device('cpu')
         torch.distributed.init_process_group(backend=backend)
         args.world_size = torch.distributed.get_world_size()
         args.rank = torch.distributed.get_rank()
@@ -282,7 +298,7 @@ def main():
               .format(device_type, args.world_size)
           )
     else:
-        args.device = torch.device("cuda:0" if args.cuda else "cpu")
+        args.device = torch.device("cuda" if args.cuda else "cpu")
         print(f"Training with a single process on 1 {device_type}.")
 
     if args.rank == 0:
@@ -292,9 +308,10 @@ def main():
        print("============ARGUMENTS==============")
        print('\n'.join(f'{k}={v}' for k, v in vars(args).items()))
        print("===================================")
+
     model = SSLHead(args)
     if args.cuda:
-        model.cuda()
+        model.to(args.local_rank)
     #else:
     #    print(f'Compiling model ZEN ? {use_zendnn}',flush=True)
     #    # Too slow when tracing, segfaults!
@@ -317,11 +334,15 @@ def main():
 
     if args.resume:
         model_pth = args.resume
-        #model_dict = torch.load(model_pth)
         model_dict = filter_load(model_pth)
+        # state_dict = model_dict["state_dict"]
+        # model.load_state_dict(state_dict, strict=False)
         model.load_state_dict(model_dict["state_dict"])
-        #model.epoch = model_dict["epoch"]
-        model.optimizer = model_dict["optimizer"]
+        # ???
+        if 'epoch' in model_dict:
+            model.epoch = model_dict["epoch"]
+        if 'optimizer' in model_dict:
+            model.optimizer = model_dict["optimizer"]
 
     if args.lrdecay:
         if args.lr_schedule == "warmup_cosine":
@@ -350,7 +371,7 @@ def main():
 
     global_step = 0
     best_val = 1e8
-    if args.amp:
+    if args.amp and GradScaler is not None:
         scaler = GradScaler()
     else:
         scaler = None
