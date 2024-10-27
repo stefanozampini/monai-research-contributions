@@ -57,9 +57,31 @@ def filter_load(model_pth):
                 state_dict[key.replace("swin_vit", "swinViT")] = state_dict.pop(key)
         return model_dict
 
+def save_ckp(model, optimizer, scheduler, global_step, model_pth):
+    checkpoint = {
+        "global_step": global_step,
+        "state_dict": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+    }
+    torch.save(checkpoint, model_pth)
+
+def load_ckp(model, optimizer, scheduler, model_pth, model_only=False):
+    ckp_dict = filter_load(model_pth)
+    global_step = ckp_dict["global_step"]
+    model_dict = ckp_dict["state_dict"]
+    model.load_state_dict(model_dict)
+    if model_only:
+      return global_step
+    if "optimizer" in ckp_dict:
+      optimizer_dict = ckp_dict["optimizer"]
+      optimizer.load_state_dict(optimizer_dict)
+    if "scheduler" in ckp_dict:
+      scheduler_dict = ckp_dict["scheduler"]
+      scheduler.load_state_dict(scheduler_dict)
+    return global_step
+
 def main():
-    def save_ckp(state, checkpoint_dir):
-        torch.save(state, checkpoint_dir)
 
     def train(args, global_step, train_loader, val_best, scaler):
         model.train()
@@ -120,12 +142,8 @@ def main():
                 #writer.add_scalar("train/loss_recon", scalar_value=np.mean(loss_train_recon), global_step=global_step)
 
                 if val_loss_recon < val_best:
-                    checkpoint = {
-                        "global_step": global_step,
-                        "state_dict": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                    }
-                    save_ckp(checkpoint, os.path.join(logdir,"model_bestValRMSE.pt"))
+                    model_pth = os.path.join(logdir,"model_bestValRMSE.pt")
+                    save_ckp(model, optimizer, scheduler, global_step, model_pth)
                     dump_images(args, img_list, "test_best", distributed=False)
                     print(
                         "Model was saved ! Best Recon. Val Loss: {:.4f}, Recon. Val Loss: {:.4f}".format(
@@ -143,6 +161,8 @@ def main():
             del x, x1, rot1, x2, rot2, x1_augment, x2_augment
             if global_step > args.num_steps:
                break
+        model_pth = os.path.join(logdir,"model_last_epoch.pt")
+        save_ckp(model, optimizer, scheduler, global_step, model_pth)
         return global_step, loss, val_best
 
     def model_to_img(inputs, args, rec = None):
@@ -245,6 +265,7 @@ def main():
     parser.add_argument("--opt", default="adamw", type=str, help="optimization algorithm")
     parser.add_argument("--lr_schedule", default="warmup_cosine", type=str)
     parser.add_argument("--resume", default=None, type=str, help="resume training")
+    parser.add_argument("--resume_model_only", default=0, type=int, help="resume training only model")
     parser.add_argument("--grad_clip", action="store_true", help="gradient clip")
     parser.add_argument("--noamp", action="store_true", help="do NOT use amp for training")
     parser.add_argument("--smartcache_dataset", action="store_true", help="use monai smartcache Dataset")
@@ -332,18 +353,6 @@ def main():
     elif args.opt == "sgd":
         optimizer = optim.SGD(params=model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
 
-    if args.resume:
-        model_pth = args.resume
-        model_dict = filter_load(model_pth)
-        # state_dict = model_dict["state_dict"]
-        # model.load_state_dict(state_dict, strict=False)
-        model.load_state_dict(model_dict["state_dict"])
-        # ???
-        if 'epoch' in model_dict:
-            model.epoch = model_dict["epoch"]
-        if 'optimizer' in model_dict:
-            model.optimizer = model_dict["optimizer"]
-
     if args.lrdecay:
         if args.lr_schedule == "warmup_cosine":
             scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=args.num_steps)
@@ -354,6 +363,10 @@ def main():
                 return (1 - float(epoch) / float(args.epochs)) ** 0.9
 
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambdas)
+
+    global_step = 0
+    if args.resume:
+        global_step = load_ckp(model, optimizer, scheduler, args.resume, args.resume_model_only)
 
     loss_function = Loss(args)
     if args.distributed:
@@ -369,7 +382,6 @@ def main():
       dump_images(args, test_loader, "test")
       return
 
-    global_step = 0
     best_val = 1e8
     if args.amp and GradScaler is not None:
         scaler = GradScaler()
@@ -377,7 +389,6 @@ def main():
         scaler = None
     while global_step < args.num_steps:
         global_step, loss, best_val = train(args, global_step, train_loader, best_val, scaler)
-    checkpoint = {"epoch": args.epochs, "state_dict": model.state_dict(), "optimizer": optimizer.state_dict()}
 
     if args.distributed:
         if dist.get_rank() == 0:
@@ -385,7 +396,6 @@ def main():
         dist.destroy_process_group()
     else:
         torch.save(model.state_dict(), os.path.join(logdir,"final_model.pth"))
-    save_ckp(checkpoint, os.path.join(logdir,"model_final_epoch.pt"))
 
 
 if __name__ == "__main__":
