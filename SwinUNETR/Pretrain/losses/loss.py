@@ -38,11 +38,13 @@ class Loss(torch.nn.Module):
     def __init__(self, args):
         super().__init__()
         self.rot_loss = torch.nn.CrossEntropyLoss()
-        if args.out_channels > 1:
-            # self.recon_loss = GEN_DICE(args.out_channels, to_onehot_y=True, softmax=True)
-            self.recon_loss = CE(args.out_channels)
-        else:
-            self.recon_loss = torch.nn.L1Loss()
+        #if args.out_channels > 1:
+        #    # self.recon_loss = GEN_DICE(args.out_channels, to_onehot_y=True, softmax=True)
+        #    # self.recon_loss = CE(args.out_channels)
+        #    self.recon_loss = torch.nn.L1Loss()
+        #else:
+        #    self.recon_loss = torch.nn.L1Loss()
+        self.recon_loss = torch.nn.L1Loss()
         self.contrast_loss = ContrastiveLoss()
         if args.cuda:
           self.rot_loss.cuda()

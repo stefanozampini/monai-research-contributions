@@ -93,52 +93,67 @@ def get_loader(args):
             ]
         )
     else:
-        # See /project/k10123/datasets/generate_geo_1.py
-        def exclude_air(img):
-            return img > 0
+        ## See /project/k10123/datasets/generate_geo_1.py
+        #def exclude_air(img):
+        #    return img > 0
 
         #allow_smaller=True
-        train_transforms = Compose(
-            [
-                LoadImaged(keys=["image"]),
-                EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-                # NO NEED TO CROP FOREGROUND
-                # CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller),
-                # Normalize to 0,1
-                ScaleIntensityRanged(
-                    keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True
-                ),
-                SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]),
-                RandSpatialCropSamplesd(
-                    keys=["image"],
-                    roi_size=[args.roi_x, args.roi_y, args.roi_z],
-                    num_samples=args.sw_batch_size,
-                    random_center=True,
-                    random_size=False,
-                ),
-                ToTensord(keys=["image"]),
-            ]
-        )
-        val_transforms = Compose(
-            [
-                LoadImaged(keys=["image"]),
-                EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-                # NO NEED TO CROP FOREGROUND
-                # CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller),
-                ScaleIntensityRanged(
-                    keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True
-                ),
-                SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]),
-                RandSpatialCropSamplesd(
-                    keys=["image"],
-                    roi_size=[args.roi_x, args.roi_y, args.roi_z],
-                    num_samples=args.sw_batch_size,
-                    random_center=True,
-                    random_size=False,
-                ),
-                ToTensord(keys=["image"]),
-            ]
-        )
+        trans = []
+        trans.append(LoadImaged(keys=["image"]))
+        if args.in_channels == 1:
+           trans.append(EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"))
+        # NO NEED TO CROP FOREGROUND
+        #trans.append(CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller))
+        trans.append(ScaleIntensityRanged(keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True))
+        trans.append(SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]))
+        trans.append(RandSpatialCropSamplesd(keys=["image"],
+                                             roi_size=[args.roi_x, args.roi_y, args.roi_z],
+                                             num_samples=args.sw_batch_size,
+                                             random_center=True,
+                                             random_size=False))
+        trans.append(ToTensord(keys=["image"]))
+
+
+        train_transforms = Compose(trans)
+        #    [
+        #        LoadImaged(keys=["image"]),
+        #        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+        #        # NO NEED TO CROP FOREGROUND
+        #        # CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller),
+        #        # Normalize to 0,1
+        #        ScaleIntensityRanged(
+        #            keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True
+        #        ),
+        #        SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]),
+        #        RandSpatialCropSamplesd(
+        #            keys=["image"],
+        #            roi_size=[args.roi_x, args.roi_y, args.roi_z],
+        #            num_samples=args.sw_batch_size,
+        #            random_center=True,
+        #            random_size=False,
+        #        ),
+        #        ToTensord(keys=["image"]),
+        #    ]
+        val_transforms = Compose(trans)
+        #    [
+        #        LoadImaged(keys=["image"]),
+        #        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+        #        # NO NEED TO CROP FOREGROUND
+        #        # CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller),
+        #        ScaleIntensityRanged(
+        #            keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True
+        #        ),
+        #        SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]),
+        #        RandSpatialCropSamplesd(
+        #            keys=["image"],
+        #            roi_size=[args.roi_x, args.roi_y, args.roi_z],
+        #            num_samples=args.sw_batch_size,
+        #            random_center=True,
+        #            random_size=False,
+        #        ),
+        #        ToTensord(keys=["image"]),
+        #    ]
+        #)
 
     kwargs = {}
     if args.num_workers > 0:

@@ -31,11 +31,15 @@ def patch_rand_drop(args, x, x_rep=None, max_drop=0.3, max_block_sz=0.25, tolr=0
         rnd_w = min(randint(tolr[1], mx_blk_width) + rnd_c, w)
         rnd_z = min(randint(tolr[2], mx_blk_slices) + rnd_s, z)
         if x_rep is None:
-            x_uninitialized = torch.empty(
+            # x_uninitialized = torch.empty(
+            #     (c, rnd_h - rnd_r, rnd_w - rnd_c, rnd_z - rnd_s), dtype=x.dtype, device=args.device
+            # ).normal_()
+            # x_uninitialized = (x_uninitialized - torch.min(x_uninitialized)) / (
+            #     torch.max(x_uninitialized) - torch.min(x_uninitialized)
+            # )
+            # SZ: Why normal distribution????
+            x_uninitialized = torch.rand(
                 (c, rnd_h - rnd_r, rnd_w - rnd_c, rnd_z - rnd_s), dtype=x.dtype, device=args.device
-            ).normal_()
-            x_uninitialized = (x_uninitialized - torch.min(x_uninitialized)) / (
-                torch.max(x_uninitialized) - torch.min(x_uninitialized)
             )
             x[:, rnd_r:rnd_h, rnd_c:rnd_w, rnd_s:rnd_z] = x_uninitialized
         else:

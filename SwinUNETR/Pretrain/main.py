@@ -120,7 +120,6 @@ def main():
                 #writer.add_scalar("train/loss_recon", scalar_value=np.mean(loss_train_recon), global_step=global_step)
 
                 if val_loss_recon < val_best:
-                    val_best = val_loss_recon
                     checkpoint = {
                         "global_step": global_step,
                         "state_dict": model.state_dict(),
@@ -133,6 +132,7 @@ def main():
                             val_best, val_loss_recon
                         ), flush=True
                     )
+                    val_best = val_loss_recon
                 else:
                     print(
                         "Model was not saved ! Best Recon. Val Loss: {:.4f} Recon. Val Loss: {:.4f}".format(
@@ -284,7 +284,7 @@ def main():
     if args.distributed:
         backend = "nccl" if args.cuda else "gloo"
         if args.cuda:
-           os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "1"
+           os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
            args.device = torch.device('cuda', args.local_rank)
            torch.cuda.set_device(args.device)
         else:
