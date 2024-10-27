@@ -10,6 +10,7 @@
 # limitations under the License.
 
 import argparse
+from utils.cpu_binding import cores_per_process
 import os
 from time import time
 
@@ -302,6 +303,9 @@ def main():
     device_type = 'GPU' if args.cuda else 'CPU'
     args.autocast_device_type = 'cuda' if args.cuda else 'cpu'
     args.local_rank = int(os.environ.get('LOCAL_RANK',0))
+    if cores_per_process > 0:
+       torch.set_num_threads(cores_per_process)
+       torch.set_num_interop_threads(cores_per_process)
     if args.distributed:
         backend = "nccl" if args.cuda else "gloo"
         if args.cuda:
@@ -321,6 +325,7 @@ def main():
     else:
         args.device = torch.device("cuda" if args.cuda else "cpu")
         print(f"Training with a single process on 1 {device_type}.")
+    print(f"Number of threads used: {torch.get_num_threads()}.")
 
     if args.rank == 0:
         os.makedirs(logdir, exist_ok=True)
