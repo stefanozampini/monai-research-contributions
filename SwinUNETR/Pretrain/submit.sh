@@ -1,12 +1,14 @@
 #!/bin/bash
 #SBATCH --partition=72hours
 #SBATCH --qos=72hours
+#SBATCH --time=72:00:00
+##SBATCH --partition=workq
+##SBATCH --time=24:00:00
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=192
 #SBATCH --hint=nomultithread
 #SBATCH --account=k10123
-#SBATCH --time=72:00:00
 #SBATCH --output=slurm-%A.out
 #SBATCH --error=slurm-%A.out
 
@@ -41,8 +43,8 @@ IMAGE_TRANSFORM_OPTIONS="--a_min $AMIN --a_max $AMAX"
 
 # input/output channels
 IN_CHANNELS=1
-OUT_CHANNELS=15
-#OUT_CHANNELS=1
+#OUT_CHANNELS=15
+OUT_CHANNELS=1
 HEAD_OPTIONS="--in_channels=$IN_CHANNELS --out_channels=$OUT_CHANNELS"
 
 DATADIR="/project/k10123/datasets/test-geo-100" # where to find datasets and jsons
@@ -54,15 +56,16 @@ DATASETLIST="dataset" # comma separated list of folder name where datasets are s
 #DATASETLIST="dataset1"
 
 # if you want to resume from previously trained weights
-# RESUME="--resume=/scratch/zampins/fm4g/first-tests-runs/1407742/model_bestValRMSE.pt"
+RESUME="--resume=/scratch/zampins/fm4g/first-tests-runs/2024-10-06T11:08+03:00_1449814_scalar/model_bestValRMSE.pt"
 
 # if you just want to dump images
 #DUMPIMG="--check_images"
 
 # Some more informative name for the output dir
-JOB_SUFFIX=_focal
+DD=$(date -I'minutes')
+JOB_SUFFIX=_scalar
 
-LOGDIR=/scratch/zampins/fm4g/first-tests-runs/${SLURM_JOB_ID}${JOB_SUFFIX} # where to dump the intermediate checkpoints
+LOGDIR=/scratch/zampins/fm4g/first-tests-runs/${DD}_${SLURM_JOB_ID}${JOB_SUFFIX} # where to dump the intermediate checkpoints
 
 # Python script with arguments
 SCRIPT="$MAIN --num_steps=$STEPS $OPTOPTS --eval_num=$EVALEVERY --batch_size=$BS --sw_batch_size=$SWBS --datadir=$DATADIR --logdir=$LOGDIR --jsonlist=$JSONLIST --datasetlist=$DATASETLIST $IMAGE_TRANSFORM_OPTIONS $HEAD_OPTIONS $RESUME $DUMPIMG"

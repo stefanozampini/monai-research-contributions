@@ -20,6 +20,7 @@ from monai.transforms import (
     Orientationd,
     RandCropByPosNegLabeld,
     RandSpatialCropSamplesd,
+    RandFlipd,
     ScaleIntensityRanged,
     Spacingd,
     SpatialPadd,
@@ -93,67 +94,55 @@ def get_loader(args):
             ]
         )
     else:
-        ## See /project/k10123/datasets/generate_geo_1.py
-        #def exclude_air(img):
-        #    return img > 0
-
-        #allow_smaller=True
-        trans = []
-        trans.append(LoadImaged(keys=["image"]))
-        if args.in_channels == 1:
-           trans.append(EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"))
-        # NO NEED TO CROP FOREGROUND
-        #trans.append(CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller))
-        trans.append(ScaleIntensityRanged(keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True))
-        trans.append(SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]))
-        trans.append(RandSpatialCropSamplesd(keys=["image"],
-                                             roi_size=[args.roi_x, args.roi_y, args.roi_z],
-                                             num_samples=args.sw_batch_size,
-                                             random_center=True,
-                                             random_size=False))
-        trans.append(ToTensord(keys=["image"]))
+        if args.task == 'pretrain':
+            trans = []
+            keys = ["image"]
+            trans.append(LoadImaged(keys=keys))
+            if args.in_channels == 1:
+               trans.append(EnsureChannelFirstd(keys=keys, channel_dim="no_channel"))
+            # NO NEED TO CROP FOREGROUND
+            #trans.append(CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller))
+            # data already prepared
+            # trans.append(ScaleIntensityRanged(keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True))
+            # trans.append(SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]))
+            trans.append(RandSpatialCropSamplesd(keys=keys,
+                                                 roi_size=[args.roi_x, args.roi_y, args.roi_z],
+                                                 num_samples=args.sw_batch_size,
+                                                 random_center=True,
+                                                 random_size=False))
+            trans.append(ToTensord(keys=keys))
 
 
-        train_transforms = Compose(trans)
-        #    [
-        #        LoadImaged(keys=["image"]),
-        #        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-        #        # NO NEED TO CROP FOREGROUND
-        #        # CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller),
-        #        # Normalize to 0,1
-        #        ScaleIntensityRanged(
-        #            keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True
-        #        ),
-        #        SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]),
-        #        RandSpatialCropSamplesd(
-        #            keys=["image"],
-        #            roi_size=[args.roi_x, args.roi_y, args.roi_z],
-        #            num_samples=args.sw_batch_size,
-        #            random_center=True,
-        #            random_size=False,
-        #        ),
-        #        ToTensord(keys=["image"]),
-        #    ]
-        val_transforms = Compose(trans)
-        #    [
-        #        LoadImaged(keys=["image"]),
-        #        EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
-        #        # NO NEED TO CROP FOREGROUND
-        #        # CropForegroundd(select_fn=exclude_air, keys=["image"], source_key="image", k_divisible=[args.roi_x, args.roi_y, args.roi_z], allow_smaller=allow_smaller),
-        #        ScaleIntensityRanged(
-        #            keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True
-        #        ),
-        #        SpatialPadd(keys="image", spatial_size=[args.roi_x, args.roi_y, args.roi_z]),
-        #        RandSpatialCropSamplesd(
-        #            keys=["image"],
-        #            roi_size=[args.roi_x, args.roi_y, args.roi_z],
-        #            num_samples=args.sw_batch_size,
-        #            random_center=True,
-        #            random_size=False,
-        #        ),
-        #        ToTensord(keys=["image"]),
-        #    ]
-        #)
+            train_transforms = Compose(trans)
+            val_transforms = Compose(trans)
+        else:
+            train_trans = []
+            val_trans = []
+            keys = ["image", "label"]
+            train_trans.append(LoadImaged(keys=keys))
+            train_trans.append(EnsureChannelFirstd(keys="label", channel_dim="no_channel"))
+            train_trans.append(RandSpatialCropSamplesd(keys=keys,
+                                                 roi_size=[args.roi_x, args.roi_y, args.roi_z],
+                                                 num_samples=args.sw_batch_size,
+                                                 random_center=True,
+                                                 random_size=False))
+            train_trans.append(RandFlipd(keys=keys, prob=0.5, spatial_axis=0))
+            train_trans.append(RandFlipd(keys=keys, prob=0.5, spatial_axis=1))
+            train_trans.append(RandFlipd(keys=keys, prob=0.5, spatial_axis=2))
+            # img <- img - mean(img) / std(img)
+            #transforms.NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
+            # img <- img * (1 + factor)
+            #transforms.RandScaleIntensityd(keys="image", factors=0.1, prob=1.0),
+            # img <- img + offset
+            #transforms.RandShiftIntensityd(keys="image", offsets=0.1, prob=1.0),
+            train_trans.append(ToTensord(keys=keys))
+
+            val_trans.append(LoadImaged(keys=keys))
+            val_trans.append(EnsureChannelFirstd(keys="label", channel_dim="no_channel"))
+            #transforms.NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
+            val_trans.append(ToTensord(keys=keys))
+            train_transforms = Compose(train_trans)
+            val_transforms = Compose(val_trans)
 
     kwargs = {}
     if args.num_workers > 0:
@@ -183,5 +172,14 @@ def get_loader(args):
     )
 
     val_ds = Dataset(data=vallist, transform=val_transforms)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True, **kwargs)
+
+    #val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True, **kwargs)
+    if args.distributed:
+        #val_sampler = DistributedSampler(dataset=val_ds, even_divisible=False, shuffle=False, drop_last=False) # drop_last goes to torch distributed sampler
+        val_sampler = DistributedSampler(dataset=val_ds, even_divisible=True, shuffle=False, drop_last=False) # drop_last goes to torch distributed sampler
+    else:
+        val_sampler = None
+    val_loader = DataLoader(
+        val_ds, batch_size=args.batch_size, sampler=val_sampler, drop_last=False, **kwargs,
+    )
     return train_loader, val_loader

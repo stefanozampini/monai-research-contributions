@@ -10,17 +10,30 @@
 # limitations under the License.
 
 import argparse
-from utils.cpu_binding import cores_per_process
+from utils.cpu_binding import num_threads, affinity
 import os
 from time import time
+from functools import partial
 
 import numpy as np
 import torch
+if affinity: # https://github.com/pytorch/pytorch/issues/99625
+    os.sched_setaffinity(os.getpid(), affinity)
+if num_threads > 0:
+    torch.set_num_threads(num_threads)
+    torch.set_num_interop_threads(num_threads)
 import torch.distributed as dist
 import torch.optim as optim
 from losses.loss import Loss
+from monai.losses import DiceLoss
+from monai.metrics import DiceMetric
+from monai.networks.nets import SwinUNETR
+from monai.transforms import Activations, AsDiscrete, Compose
+from monai.inferers import sliding_window_inference
 from models.ssl_head import SSLHead
-from optimizers.lr_scheduler import WarmupCosineSchedule
+from monai.utils.enums import MetricReduction
+from seg_trainer import run_training
+from optimizers.lr_scheduler import WarmupCosineSchedule, LinearWarmupCosineAnnealingLR
 from torch import autocast
 try:
     from torch import GradScaler
@@ -31,6 +44,7 @@ from torch.nn.parallel import DistributedDataParallel
 #from torch.utils.tensorboard import SummaryWriter
 from utils.data_utils import get_loader
 from utils.ops import aug_rand, rot_rand
+from utils.ckp import load_ckp, save_ckp
 
 def model_view(model):
     cnt = 0
@@ -43,51 +57,14 @@ def model_view(model):
     out.append(f'  Total: {int(cnt)}')
     print('\n'.join(out), flush=True)
 
-def filter_load(model_pth):
-        model_dict = torch.load(model_pth)
-        state_dict = model_dict["state_dict"]
-        # fix potential differences in state dict keys from pre-training to
-        # fine-tuning
-        if "module." in list(state_dict.keys())[0]:
-            print("Tag 'module.' found in state dict - fixing!")
-            for key in list(state_dict.keys()):
-                state_dict[key.replace("module.", "")] = state_dict.pop(key)
-        if "swin_vit" in list(state_dict.keys())[0]:
-            print("Tag 'swin_vit' found in state dict - fixing!")
-            for key in list(state_dict.keys()):
-                state_dict[key.replace("swin_vit", "swinViT")] = state_dict.pop(key)
-        return model_dict
-
-def save_ckp(model, optimizer, scheduler, global_step, model_pth):
-    checkpoint = {
-        "global_step": global_step,
-        "state_dict": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-    }
-    torch.save(checkpoint, model_pth)
-
-def load_ckp(model, optimizer, scheduler, model_pth, model_only=False):
-    ckp_dict = filter_load(model_pth)
-    global_step = ckp_dict["global_step"]
-    model_dict = ckp_dict["state_dict"]
-    model.load_state_dict(model_dict)
-    if model_only:
-      return global_step
-    if "optimizer" in ckp_dict:
-      optimizer_dict = ckp_dict["optimizer"]
-      optimizer.load_state_dict(optimizer_dict)
-    if "scheduler" in ckp_dict:
-      scheduler_dict = ckp_dict["scheduler"]
-      scheduler.load_state_dict(scheduler_dict)
-    return global_step
-
 def main():
 
-    def train(args, global_step, train_loader, val_best, scaler):
+    def train(args, global_step, train_loader, val_best, scaler, epoch):
         model.train()
         loss_train = []
         loss_train_recon = []
+        if args.distributed:
+           train_loader.set_epoch(epoch)
 
         for step, batch in enumerate(train_loader):
             t1 = time()
@@ -96,8 +73,6 @@ def main():
             x2, rot2 = rot_rand(args, x)
             x1_augment = aug_rand(args, x1)
             x2_augment = aug_rand(args, x2)
-            x1_augment = x1_augment
-            x2_augment = x2_augment
             t2 = time()
             with autocast(args.autocast_device_type, enabled=args.amp):
                 rot1_p, contrastive1_p, rec_x1 = model(x1_augment)
@@ -124,46 +99,49 @@ def main():
             if args.lrdecay:
                 scheduler.step()
             optimizer.zero_grad()
-            if args.rank == 0:
-                print("Step:{}/{}, Loss:{:.4f} ({:.4f}, {:.4f}, {:.4f}), Time:{:.4f} ({:.4f})".format(global_step, args.num_steps, loss, losses_tasks[0].item(), losses_tasks[1].item(), losses_tasks[2].item(), time() - t1, t2 - t1),flush=True)
+            t3 = time()
 
             global_step += 1
-            if args.distributed:
-                val_cond = (dist.get_rank() == 0) and (global_step % args.eval_num == 0)
-            else:
-                val_cond = global_step % args.eval_num == 0
+            val_cond = global_step % args.eval_num == 0
 
             if val_cond:
                 val_loss, val_loss_recon, img_list = validation(args, test_loader)
-                print("Validation/loss_recon", val_loss_recon, global_step,flush=True)
-                print("train/loss_total", np.mean(loss_train), global_step,flush=True)
-                print("train/loss_recon", np.mean(loss_train_recon), global_step,flush=True)
+                if args.rank == 0:
+                    print("Validation/loss_recon", val_loss_recon, global_step,flush=True)
+                    print("train/loss_total", np.mean(loss_train), global_step,flush=True)
+                    print("train/loss_recon", np.mean(loss_train_recon), global_step,flush=True)
                 #writer.add_scalar("Validation/loss_recon", scalar_value=val_loss_recon, global_step=global_step)
                 #writer.add_scalar("train/loss_total", scalar_value=np.mean(loss_train), global_step=global_step)
                 #writer.add_scalar("train/loss_recon", scalar_value=np.mean(loss_train_recon), global_step=global_step)
 
+                    if val_loss_recon < val_best:
+                        model_pth = os.path.join(logdir,"model_bestValRMSE.pt")
+                        save_ckp(args.task, model, optimizer, scheduler, global_step, model_pth)
+                        print(
+                            "Model was saved ! Best Recon. Val Loss: {:.4f}, Recon. Val Loss: {:.4f}".format(
+                                val_best, val_loss_recon
+                            ), flush=True
+                        )
+                    else:
+                        print(
+                            "Model was not saved ! Best Recon. Val Loss: {:.4f} Recon. Val Loss: {:.4f}".format(
+                                val_best, val_loss_recon
+                            ), flush=True
+                        )
+
                 if val_loss_recon < val_best:
-                    model_pth = os.path.join(logdir,"model_bestValRMSE.pt")
-                    save_ckp(model, optimizer, scheduler, global_step, model_pth)
-                    dump_images(args, img_list, "test_best", distributed=False)
-                    print(
-                        "Model was saved ! Best Recon. Val Loss: {:.4f}, Recon. Val Loss: {:.4f}".format(
-                            val_best, val_loss_recon
-                        ), flush=True
-                    )
                     val_best = val_loss_recon
-                else:
-                    print(
-                        "Model was not saved ! Best Recon. Val Loss: {:.4f} Recon. Val Loss: {:.4f}".format(
-                            val_best, val_loss_recon
-                        ), flush=True
-                    )
+                    dump_images(args, img_list, "test_best")
                 del img_list
             del x, x1, rot1, x2, rot2, x1_augment, x2_augment
+            if args.rank == 0:
+                print("Step:{}/{}, Loss:{:.4f} ({:.4f}, {:.4f}, {:.4f}), Time:{:.4f} ({:.4f}, {:.4f})".format(global_step - 1, args.num_steps, loss, losses_tasks[0].item(), losses_tasks[1].item(), losses_tasks[2].item(), time() - t1, t3 - t1, t2 - t1),flush=True)
             if global_step > args.num_steps:
-               break
-        model_pth = os.path.join(logdir,"model_last_epoch.pt")
-        save_ckp(model, optimizer, scheduler, global_step, model_pth)
+                break
+        if args.rank == 0:
+            t1 = time()
+            model_pth = os.path.join(logdir,"model_last_epoch.pt")
+            save_ckp(args.task, model, optimizer, scheduler, global_step, model_pth)
         return global_step, loss, val_best
 
     def model_to_img(inputs, args, rec = None):
@@ -203,10 +181,16 @@ def main():
                 loss_val.append(loss.item())
                 loss_val_recon.append(loss_recon.item())
                 img_list.append((or_in, rec_in, or_x1, rec_x1, or_x2, rec_x2))
-                print("    Validation step:{}, Losses:{:.4f}, {:.4f}, {:.4f}".format(step, losses_tasks[0], losses_tasks[1], losses_tasks[2]),flush=True)
+                print("    [{}] Validation step:{}, Losses:{:.4f}, {:.4f}, {:.4f} bs: {}".format(args.rank, step, losses_tasks[0], losses_tasks[1], losses_tasks[2], val_inputs.shape[0]),flush=True)
                 del val_inputs, x1, rot1, x2, rot2, x1_augment, x2_augment
 
-        return np.mean(loss_val), np.mean(loss_val_recon), img_list
+        if args.cuda:
+            torch.cuda.synchronize(args.device)
+        dummy = torch.tensor([sum(loss_val), sum(loss_val_recon), len(loss_val)], device=args.device)
+        dist.all_reduce(dummy, op=dist.ReduceOp.SUM)
+        loss_val_mean = dummy[0]/dummy[2]
+        loss_recon_mean = dummy[1]/dummy[2]
+        return loss_val_mean.item(), loss_recon_mean.item(), img_list
 
     def dump_images(args, loader_or_img_list, basename, distributed=True):
         model.eval()
@@ -274,6 +258,8 @@ def main():
     parser.add_argument("--check_images", action="store_true", help="dump images")
     parser.add_argument("--view_model", action="store_true", help="view model")
     parser.add_argument("--num_workers", default=4, type=int, help="number of workers")
+    parser.add_argument("--task", default='pretrain', type=str, help="training task")
+    parser.add_argument("--infer_overlap", default=0.5, type=float, help="sliding window inference overlap")
     #parser.add_argument('--no-zendnn', action='store_true', default=False, help='disables ZenDNN')
     args = parser.parse_args()
 
@@ -303,9 +289,6 @@ def main():
     device_type = 'GPU' if args.cuda else 'CPU'
     args.autocast_device_type = 'cuda' if args.cuda else 'cpu'
     args.local_rank = int(os.environ.get('LOCAL_RANK',0))
-    if cores_per_process > 0:
-       torch.set_num_threads(cores_per_process)
-       torch.set_num_interop_threads(cores_per_process)
     if args.distributed:
         backend = "nccl" if args.cuda else "gloo"
         if args.cuda:
@@ -324,8 +307,10 @@ def main():
           )
     else:
         args.device = torch.device("cuda" if args.cuda else "cpu")
-        print(f"Training with a single process on 1 {device_type}.")
-    print(f"Number of threads used: {torch.get_num_threads()}.")
+        if args.rank == 0:
+          print(f"Training with a single process on 1 {device_type}.")
+    if args.rank == 0:
+        print(f"Number of threads used: {torch.get_num_threads()}.")
 
     if args.rank == 0:
         os.makedirs(logdir, exist_ok=True)
@@ -335,7 +320,20 @@ def main():
        print('\n'.join(f'{k}={v}' for k, v in vars(args).items()))
        print("===================================")
 
-    model = SSLHead(args)
+    if args.task == 'pretrain':
+        model = SSLHead(args)
+    else:
+        model = SwinUNETR(
+            (args.roi_x, args.roi_y, args.roi_z),
+            args.in_channels,
+            args.out_channels,
+            # img_size=(args.roi_x, args.roi_y, args.roi_z), # deprecated
+            # in_channels=args.in_channels,
+            # out_channels=args.out_channels,
+            feature_size=args.feature_size,
+            use_checkpoint=args.use_checkpoint,
+        )
+
     if args.cuda:
         model.to(args.local_rank)
     #else:
@@ -349,31 +347,42 @@ def main():
     if args.view_model:
        model_view(model)
 
+    optimizer = None
+    scheduler = None
     if args.opt == "adam":
         optimizer = optim.Adam(params=model.parameters(), lr=args.lr, weight_decay=args.decay)
-
     elif args.opt == "adamw":
         optimizer = optim.AdamW(params=model.parameters(), lr=args.lr, weight_decay=args.decay)
-
-    elif args.opt == "sgd":
+    else:
         optimizer = optim.SGD(params=model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
 
     if args.lrdecay:
-        if args.lr_schedule == "warmup_cosine":
-            scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=args.num_steps)
+        if args.task == "pretrain":
+            if args.lr_schedule == "warmup_cosine":
+                scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=args.num_steps)
 
-        elif args.lr_schedule == "poly":
+            elif args.lr_schedule == "poly":
 
-            def lambdas(epoch):
-                return (1 - float(epoch) / float(args.epochs)) ** 0.9
+                def lambdas(epoch):
+                    return (1 - float(epoch) / float(args.epochs)) ** 0.9
 
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambdas)
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambdas)
+        else:
+            if args.lr_schedule == "warmup_cosine":
+                scheduler = LinearWarmupCosineAnnealingLR(
+                    optimizer, warmup_epochs=args.warmup_steps, max_epochs=args.num_steps
+                )
+            elif args.lr_schedule == "cosine_anneal":
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_steps)
 
     global_step = 0
     if args.resume:
-        global_step = load_ckp(model, optimizer, scheduler, args.resume, args.resume_model_only)
+        global_step = load_ckp(args.task, model, optimizer, scheduler, args.resume, args.resume_model_only)
 
-    loss_function = Loss(args)
+    if args.task == 'pretrain':
+        loss_function = Loss(args)
+    else:
+        loss_function = DiceLoss(to_onehot_y=True, sigmoid=True)
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         if args.cuda:
@@ -392,15 +401,46 @@ def main():
         scaler = GradScaler()
     else:
         scaler = None
-    while global_step < args.num_steps:
-        global_step, loss, best_val = train(args, global_step, train_loader, best_val, scaler)
-
-    if args.distributed:
-        if dist.get_rank() == 0:
-            torch.save(model.state_dict(), os.path.join(logdir,"final_model.pth"))
-        dist.destroy_process_group()
+    if args.task == 'pretrain':
+        epoch = 0
+        while global_step < args.num_steps:
+            global_step, loss, best_val = train(args, global_step, train_loader, best_val, scaler, epoch)
+            epoch += 1
     else:
+        inf_size = [args.roi_x, args.roi_y, args.roi_z]
+        post_sigmoid = Activations(sigmoid=True)
+        post_pred = AsDiscrete(argmax=False, logit_thresh=0.5)
+        dice_acc = DiceMetric(include_background=True, reduction=MetricReduction.MEAN_BATCH, get_not_nans=True)
+        model_inferer = partial(
+            sliding_window_inference,
+            roi_size=inf_size,
+            sw_batch_size=args.sw_batch_size,
+            predictor=model,
+            overlap=args.infer_overlap,
+        )
+        run_training(
+            model=model,
+            train_loader=train_loader,
+            val_loader=test_loader,
+            optimizer=optimizer,
+            loss_func=loss_function,
+            acc_func=dice_acc,
+            args=args,
+            model_inferer=model_inferer,
+            scheduler=scheduler,
+            scaler=scaler, # SZ
+            start_epoch=global_step,
+            end_epoch=args.num_steps,
+            post_sigmoid=post_sigmoid,
+            post_pred=post_pred,
+            #semantic_classes=semantic_classes,
+        )
+
+
+    if args.rank == 0:
         torch.save(model.state_dict(), os.path.join(logdir,"final_model.pth"))
+    if args.distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
