@@ -54,18 +54,16 @@ IN_CHANNELS=2
 OUT_CHANNELS=2
 HEAD_OPTIONS="--in_channels=$IN_CHANNELS --out_channels=$OUT_CHANNELS"
 
-DATADIR="/project/k10123/datasets/multichannel_output_1000" # where to find datasets and jsons
-JSONLIST="dataset_0_pretrain.json" # comma separated list of json filenames
-DATASETLIST="dataset" # comma separated list of folder name where datasets are stored
+JSONLIST="dataset_0_pretrain.json"
+DATASETLIST="dataset"
 
-# if you want to resume from previously trained weights
-# RESUME="--resume=/ibex/ai/home/zampins/fm4g/logs/35770044_100_multichannel_step4_d1me3/model_bestValRMSE.pt"
+#DATADIR="/project/k10123/datasets/multichannel_output_1000_nodikes"
+#RESUME="--resume=/scratch/zampins/fm4g/shaheen-pretrain-runs/1606765_run1_step0_nodikes/model_last_epoch.pt"
+#JOB_SUFFIX=_run1_step1_nodikes
 
-# if you just want to dump images
-#DUMPIMG="--check_images"
-
-# Some more informative name for the output dir
-JOB_SUFFIX=_run1_step0
+DATADIR="/project/k10123/datasets/multichannel_output_1000"
+RESUME="--resume=/scratch/zampins/fm4g/shaheen-pretrain-runs/1607612_run1_step0/model_last_epoch.pt"
+JOB_SUFFIX=_run1_step1
 
 LOGDIR=/scratch/zampins/fm4g/shaheen-pretrain-runs/${SLURM_JOB_ID}${JOB_SUFFIX} # where to dump the intermediate checkpoints
 

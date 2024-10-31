@@ -64,7 +64,8 @@ def main():
         loss_train = []
         loss_train_recon = []
         if args.distributed:
-           train_loader.set_epoch(epoch)
+            train_loader.sampler.set_epoch(epoch)
+            torch.distributed.barrier()
 
         for step, batch in enumerate(train_loader):
             t1 = time()
@@ -105,6 +106,8 @@ def main():
             val_cond = global_step % args.eval_num == 0
 
             if val_cond:
+                if args.distributed:
+                    torch.distributed.barrier()
                 val_loss, val_loss_recon, img_list = validation(args, test_loader)
                 if args.rank == 0:
                     print("Validation/loss_recon", val_loss_recon, global_step,flush=True)

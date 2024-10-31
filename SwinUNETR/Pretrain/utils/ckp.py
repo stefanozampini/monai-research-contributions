@@ -6,14 +6,49 @@ def filter_load(model_pth):
     # fix potential differences in state dict keys from pre-training to
     # fine-tuning
     if "module." in list(state_dict.keys())[0]:
-        print("Tag 'module.' found in state dict - fixing!")
+        # print("Tag 'module.' found in state dict - fixing!")
         for key in list(state_dict.keys()):
             state_dict[key.replace("module.", "")] = state_dict.pop(key)
     if "swin_vit" in list(state_dict.keys())[0]:
-        print("Tag 'swin_vit' found in state dict - fixing!")
+        # print("Tag 'swin_vit' found in state dict - fixing!")
         for key in list(state_dict.keys()):
             state_dict[key.replace("swin_vit", "swinViT")] = state_dict.pop(key)
     return model_dict
+    ## TODO extend to handle different patch embedding (input channels)
+    ## Access the PatchEmbed module within SwinViT
+    #patch_embed_layer = model.swinViT.patch_embed
+
+    ## Create a new convolutional layer with 4 input channels for 3D data
+    #new_proj = nn.Conv3d(4, patch_embed_layer.embed_dim, kernel_size=patch_embed_layer.patch_size,
+    #                     stride=patch_embed_layer.patch_size)
+
+    ## Initialize the weights for the new channels
+    #with torch.no_grad():
+    #    # Get the original weights
+    #    original_weights = patch_embed_layer.proj.weight.clone()
+
+    #    # Modify only the weights for the additional channels as needed
+    #    # For example, re-initialize weights for channels 3 and 4
+    #    nn.init.kaiming_normal_(original_weights[:, 2:4, :, :, :], mode='fan_out', nonlinearity='relu')
+
+    #    # Assign the modified weights back to the layer
+    #    patch_embed_layer.proj.weight = nn.Parameter(original_weights)
+
+    ## Replace the original proj layer with the new layer
+    #patch_embed_layer.proj = new_proj
+
+    ## Load the pre-trained model weights
+    #checkpoint = torch.load(pretrained_pth)
+    #pretrained_state_dict = checkpoint['state_dict']
+    #
+    ## Prepare a new state dictionary for SwinUNETR's SwinViT part
+    #new_state_dict = {}
+    #for k, v in pretrained_state_dict.items():
+    #    if k.startswith('module.swinViT.'):
+    #        new_key = k.replace('module.swinViT.', '')  # Remove the prefix
+    #        # Skip loading weights for the PatchEmbed proj layer
+    #        if new_key != 'patch_embed.proj.weight' and new_key != 'patch_embed.proj.bias':
+    #            new_state_dict[new_key] = v
 
 def save_ckp(task, model, optimizer, scheduler, global_step, model_pth):
     checkpoint = {
@@ -44,4 +79,3 @@ def load_ckp(task, model, optimizer, scheduler, model_pth, model_only=False):
       if scheduler_dict is not None:
          scheduler.load_state_dict(scheduler_dict)
     return global_step
-
