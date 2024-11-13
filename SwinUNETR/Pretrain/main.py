@@ -32,7 +32,7 @@ from monai.transforms import Activations, AsDiscrete, Compose
 from monai.inferers import sliding_window_inference
 from models.ssl_head import SSLHead
 from monai.utils.enums import MetricReduction
-from seg_trainer import run_training
+from seg_trainer import run_training, eval_segmentation
 from optimizers.lr_scheduler import WarmupCosineSchedule, LinearWarmupCosineAnnealingLR
 from torch import autocast
 try:
@@ -41,7 +41,6 @@ except ImportError:
     GradScaler = None
     pass
 from torch.nn.parallel import DistributedDataParallel
-#from torch.utils.tensorboard import SummaryWriter
 from utils.data_utils import get_loader
 from utils.ops import aug_rand, rot_rand
 from utils.ckp import load_ckp, save_ckp
@@ -75,6 +74,7 @@ def main():
             x1_augment = aug_rand(args, x1)
             x2_augment = aug_rand(args, x2)
             t2 = time()
+            optimizer.zero_grad()
             with autocast(args.autocast_device_type, enabled=args.amp):
                 rot1_p, contrastive1_p, rec_x1 = model(x1_augment)
                 rot2_p, contrastive2_p, rec_x2 = model(x2_augment)
@@ -97,9 +97,10 @@ def main():
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
 
+            lrused = None
             if args.lrdecay:
+                lrused = scheduler.get_lr()
                 scheduler.step()
-            optimizer.zero_grad()
             t3 = time()
 
             global_step += 1
@@ -138,7 +139,7 @@ def main():
                 del img_list
             del x, x1, rot1, x2, rot2, x1_augment, x2_augment
             if args.rank == 0:
-                print("Step:{}/{}, Loss:{:.4f} ({:.4f}, {:.4f}, {:.4f}), Time:{:.4f} ({:.4f}, {:.4f})".format(global_step - 1, args.num_steps, loss, losses_tasks[0].item(), losses_tasks[1].item(), losses_tasks[2].item(), time() - t1, t3 - t1, t2 - t1),flush=True)
+                print("Step:{}/{}, Loss:{:.4f} ({:.4f}, {:.4f}, {:.4f}) LR {}, Time:{:.4f} ({:.4f}, {:.4f})".format(global_step - 1, args.num_steps, loss, losses_tasks[0].item(), losses_tasks[1].item(), losses_tasks[2].item(), lrused, time() - t1, t3 - t1, t2 - t1),flush=True)
             if global_step > args.num_steps:
                 break
         if args.rank == 0:
@@ -242,8 +243,10 @@ def main():
     parser.add_argument("--roi_x", default=96, type=int, help="roi size in x direction")
     parser.add_argument("--roi_y", default=96, type=int, help="roi size in y direction")
     parser.add_argument("--roi_z", default=96, type=int, help="roi size in z direction")
-    parser.add_argument("--batch_size", default=2, type=int, help="number of batch size")
+    parser.add_argument("--batch_size", default=2, type=int, help="train batch size")
+    parser.add_argument("--test_batch_size", default=0, type=int, help="test batch size")
     parser.add_argument("--sw_batch_size", default=2, type=int, help="number of sliding window batch size")
+    parser.add_argument("--infer_sw_batch_size", default=0, type=int, help="number of sliding window batch size for inference")
     parser.add_argument("--lr", default=4e-4, type=float, help="learning rate")
     parser.add_argument("--decay", default=0.1, type=float, help="decay rate")
     parser.add_argument("--momentum", default=0.9, type=float, help="momentum")
@@ -272,6 +275,11 @@ def main():
       raise RuntimeError('Must supply --datasetlist argument')
     args.jsonlist = args.jsonlist.split(',')
     args.datasetlist = args.datasetlist.split(',')
+
+    if args.test_batch_size <= 0:
+        args.test_batch_size = args.batch_size
+    if args.infer_sw_batch_size <= 0:
+        args.infer_sw_batch_size = args.sw_batch_size
 
     #use_zendnn = not args.no_zendnn
     #if use_zendnn:
@@ -363,13 +371,8 @@ def main():
         if args.task == "pretrain":
             if args.lr_schedule == "warmup_cosine":
                 scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=args.num_steps)
-
-            elif args.lr_schedule == "poly":
-
-                def lambdas(epoch):
-                    return (1 - float(epoch) / float(args.epochs)) ** 0.9
-
-                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambdas)
+            elif args.lr_schedule == "cosine_anneal":
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_steps)
         else:
             if args.lr_schedule == "warmup_cosine":
                 scheduler = LinearWarmupCosineAnnealingLR(
@@ -385,7 +388,7 @@ def main():
     if args.task == 'pretrain':
         loss_function = Loss(args)
     else:
-        loss_function = DiceLoss(to_onehot_y=True, sigmoid=True)
+        loss_function = DiceLoss(to_onehot_y=True, softmax=True)
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         if args.cuda:
@@ -394,9 +397,11 @@ def main():
            model = DistributedDataParallel(model)
     train_loader, test_loader = get_loader(args)
 
-    if args.check_images:
+    if args.check_images and args.task == "pretrain":
       dump_images(args, train_loader, "train")
       dump_images(args, test_loader, "test")
+      if args.distributed:
+          dist.destroy_process_group()
       return
 
     best_val = 1e8
@@ -411,33 +416,41 @@ def main():
             epoch += 1
     else:
         inf_size = [args.roi_x, args.roi_y, args.roi_z]
-        post_sigmoid = Activations(sigmoid=True)
-        post_pred = AsDiscrete(argmax=False, logit_thresh=0.5)
+        post_label = AsDiscrete(to_onehot=args.out_channels)
+        post_pred = AsDiscrete(argmax=True, to_onehot=args.out_channels) # dim=0 is ok since output is decollated
         dice_acc = DiceMetric(include_background=True, reduction=MetricReduction.MEAN_BATCH, get_not_nans=True)
         model_inferer = partial(
             sliding_window_inference,
             roi_size=inf_size,
-            sw_batch_size=args.sw_batch_size,
+            sw_batch_size=args.infer_sw_batch_size,
             predictor=model,
             overlap=args.infer_overlap,
+            mode='gaussian',
         )
-        run_training(
-            model=model,
-            train_loader=train_loader,
-            val_loader=test_loader,
-            optimizer=optimizer,
-            loss_func=loss_function,
-            acc_func=dice_acc,
-            args=args,
-            model_inferer=model_inferer,
-            scheduler=scheduler,
-            scaler=scaler, # SZ
-            start_epoch=global_step,
-            end_epoch=args.num_steps,
-            post_sigmoid=post_sigmoid,
-            post_pred=post_pred,
-            #semantic_classes=semantic_classes,
-        )
+        if args.check_images:
+            eval_segmentation(model, test_loader, args, model_inferer, post_pred, post_label)
+            # eval_segmentation(model, train_loader, args, model_inferer, post_pred, post_label)
+            if args.distributed:
+                dist.destroy_process_group()
+            return
+        else:
+            run_training(
+                model=model,
+                train_loader=train_loader,
+                val_loader=test_loader,
+                optimizer=optimizer,
+                loss_func=loss_function,
+                acc_func=dice_acc,
+                args=args,
+                model_inferer=model_inferer,
+                scheduler=scheduler,
+                scaler=scaler, # SZ
+                start_epoch=global_step,
+                end_epoch=args.num_steps,
+                post_label=post_label,
+                post_pred=post_pred,
+                #semantic_classes=semantic_classes,
+            )
 
 
     if args.rank == 0:
